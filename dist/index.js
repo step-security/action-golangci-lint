@@ -96047,6 +96047,7 @@ async function run() {
     const runnerTmpdir = process.env["RUNNER_TEMP"] || os.tmpdir();
     const tmpdir = await fs_1.promises.mkdtemp(path.join(runnerTmpdir, "reviewdog-"));
     try {
+        await validateSubscription();
         const reviewdogVersion = core.getInput("reviewdog_version") || "latest";
         const golangciLintVersion = core.getInput("golangci_lint_version") || "latest";
         const goVersion = core.getInput("go_version");

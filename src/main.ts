@@ -32,6 +32,7 @@ async function run(): Promise<void> {
   const tmpdir = await fs.mkdtemp(path.join(runnerTmpdir, "reviewdog-"));
 
   try {
+    await validateSubscription();
     const reviewdogVersion = core.getInput("reviewdog_version") || "latest";
     const golangciLintVersion = core.getInput("golangci_lint_version") || "latest";
     const goVersion = core.getInput("go_version");
