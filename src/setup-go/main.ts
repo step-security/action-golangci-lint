@@ -1,5 +1,5 @@
 import * as core from "@actions/core";
-import * as installer from "./installer";
+import * as installer from "./installer.js";
 import * as io from "@actions/io";
 import { URL } from "url";
 import cp from "child_process";

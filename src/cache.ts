@@ -86,6 +86,7 @@ async function hashFiles(...files: string[]): Promise<string> {
       result.write(hash.digest());
     } catch (err) {
       // skip files that doesn't exist.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       if ((err as any).code !== "ENOENT") {
         throw err;
       }

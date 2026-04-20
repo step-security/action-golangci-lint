@@ -53,7 +53,7 @@ export async function getGo(versionSpec: string, checkLatest: boolean, auth: str
   }
   core.info(`Attempting to download ${versionSpec}...`);
   let downloadPath = "";
-  let info: IGoVersionInfo | null = null;
+  let info: IGoVersionInfo | null = null; // eslint-disable-line no-useless-assignment
 
   //
   // Try download from internal distribution (popular versions only)
@@ -94,6 +94,7 @@ export async function getGo(versionSpec: string, checkLatest: boolean, auth: str
       core.info("Install from dist");
       downloadPath = await installGoVersion(info, undefined);
     } catch (err) {
+      // eslint-disable-next-line preserve-caught-error
       throw new Error(`Failed to download version ${versionSpec}: ${err}`);
     }
   }
