@@ -2,7 +2,7 @@ import * as core from "@actions/core";
 import * as httpm from "@actions/http-client";
 import * as path from "path";
 import * as semver from "semver";
-import * as sys from "./system";
+import * as sys from "./system.js";
 import * as tc from "@actions/tool-cache";
 import os from "os";
 import fs from "fs";
@@ -53,7 +53,7 @@ export async function getGo(versionSpec: string, checkLatest: boolean, auth: str
   }
   core.info(`Attempting to download ${versionSpec}...`);
   let downloadPath = "";
-  let info: IGoVersionInfo | null = null;
+  let info: IGoVersionInfo | null = null; // eslint-disable-line no-useless-assignment
 
   //
   // Try download from internal distribution (popular versions only)
@@ -68,7 +68,7 @@ export async function getGo(versionSpec: string, checkLatest: boolean, auth: str
   } catch (err) {
     if (err instanceof tc.HTTPError && (err.httpStatusCode === 403 || err.httpStatusCode === 429)) {
       core.info(
-        `Received HTTP status code ${err.httpStatusCode}.  This usually indicates the rate limit has been exceeded`
+        `Received HTTP status code ${err.httpStatusCode}.  This usually indicates the rate limit has been exceeded`,
       );
     } else {
       core.info(`${err}`);
@@ -82,7 +82,7 @@ export async function getGo(versionSpec: string, checkLatest: boolean, auth: str
   }
 
   //
-  // Download from storage.googleapis.com
+  // Download from go.dev
   //
   if (!downloadPath) {
     info = await getInfoFromDist(versionSpec);
@@ -94,6 +94,7 @@ export async function getGo(versionSpec: string, checkLatest: boolean, auth: str
       core.info("Install from dist");
       downloadPath = await installGoVersion(info, undefined);
     } catch (err) {
+      // eslint-disable-next-line preserve-caught-error
       throw new Error(`Failed to download version ${versionSpec}: ${err}`);
     }
   }
@@ -104,7 +105,7 @@ export async function getGo(versionSpec: string, checkLatest: boolean, auth: str
 async function resolveVersionFromManifest(
   versionSpec: string,
   stable: boolean,
-  auth: string | undefined
+  auth: string | undefined,
 ): Promise<string | undefined> {
   try {
     const info = await getInfoFromManifest(versionSpec, stable, auth);
@@ -148,7 +149,7 @@ export async function extractGoArchive(archivePath: string): Promise<string> {
 export async function getInfoFromManifest(
   versionSpec: string,
   stable: boolean,
-  auth: string | undefined
+  auth: string | undefined,
 ): Promise<IGoVersionInfo | null> {
   let info: IGoVersionInfo | null = null;
   const releases = await tc.getManifestFromRepo("actions", "go-versions", auth, "main");
@@ -172,7 +173,7 @@ async function getInfoFromDist(versionSpec: string): Promise<IGoVersionInfo | nu
     return null;
   }
 
-  const downloadUrl = `https://storage.googleapis.com/golang/${version.files[0].filename}`;
+  const downloadUrl = `https://go.dev/dl/${version.files[0].filename}`;
 
   return {
     type: "dist",
