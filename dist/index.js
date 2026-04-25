@@ -3,7 +3,7 @@ import fs__default, { promises, writeFileSync, existsSync } from 'fs';
 import * as os from 'os';
 import os__default from 'os';
 import * as path from 'path';
-import path__default from 'path';
+import path__default, { resolve } from 'path';
 import * as crypto$1 from 'crypto';
 import crypto__default from 'crypto';
 import * as http from 'http';
@@ -2823,15 +2823,23 @@ function requireDispatcherBase () {
 	const kOnDestroyed = Symbol('onDestroyed');
 	const kOnClosed = Symbol('onClosed');
 	const kInterceptedDispatch = Symbol('Intercepted Dispatch');
+	const kWebSocketOptions = Symbol('webSocketOptions');
 
 	class DispatcherBase extends Dispatcher {
-	  constructor () {
+	  constructor (opts) {
 	    super();
 
 	    this[kDestroyed] = false;
 	    this[kOnDestroyed] = null;
 	    this[kClosed] = false;
 	    this[kOnClosed] = [];
+	    this[kWebSocketOptions] = opts?.webSocket ?? {};
+	  }
+
+	  get webSocketOptions () {
+	    return {
+	      maxPayloadSize: this[kWebSocketOptions].maxPayloadSize ?? 128 * 1024 * 1024
+	    }
 	  }
 
 	  get destroyed () {
@@ -11209,9 +11217,10 @@ function requireClient () {
 	    autoSelectFamilyAttemptTimeout,
 	    // h2
 	    maxConcurrentStreams,
-	    allowH2
+	    allowH2,
+	    webSocket
 	  } = {}) {
-	    super();
+	    super({ webSocket });
 
 	    if (keepAlive !== undefined) {
 	      throw new InvalidArgumentError('unsupported keepAlive, use pipelining=0 instead')
@@ -11918,8 +11927,8 @@ function requirePoolBase () {
 	const kStats = Symbol('stats');
 
 	class PoolBase extends DispatcherBase {
-	  constructor () {
-	    super();
+	  constructor (opts) {
+	    super(opts);
 
 	    this[kQueue] = new FixedQueue();
 	    this[kClients] = [];
@@ -12138,8 +12147,6 @@ function requirePool () {
 	    allowH2,
 	    ...options
 	  } = {}) {
-	    super();
-
 	    if (connections != null && (!Number.isFinite(connections) || connections < 0)) {
 	      throw new InvalidArgumentError('invalid connections')
 	    }
@@ -12163,6 +12170,8 @@ function requirePool () {
 	        ...connect
 	      });
 	    }
+
+	    super(options);
 
 	    this[kInterceptors] = options.interceptors?.Pool && Array.isArray(options.interceptors.Pool)
 	      ? options.interceptors.Pool
@@ -12457,7 +12466,6 @@ function requireAgent () {
 
 	class Agent extends DispatcherBase {
 	  constructor ({ factory = defaultFactory, maxRedirections = 0, connect, ...options } = {}) {
-	    super();
 
 	    if (typeof factory !== 'function') {
 	      throw new InvalidArgumentError('factory must be a function.')
@@ -12470,6 +12478,8 @@ function requireAgent () {
 	    if (!Number.isInteger(maxRedirections) || maxRedirections < 0) {
 	      throw new InvalidArgumentError('maxRedirections must be a positive number')
 	    }
+
+	    super(options);
 
 	    if (connect && typeof connect !== 'function') {
 	      connect = { ...connect };
@@ -25611,40 +25621,35 @@ function requirePermessageDeflate () {
 	const kBuffer = Symbol('kBuffer');
 	const kLength = Symbol('kLength');
 
-	// Default maximum decompressed message size: 4 MB
-	const kDefaultMaxDecompressedSize = 4 * 1024 * 1024;
-
 	class PerMessageDeflate {
 	  /** @type {import('node:zlib').InflateRaw} */
 	  #inflate
 
 	  #options = {}
 
-	  /** @type {boolean} */
-	  #aborted = false
-
-	  /** @type {Function|null} */
-	  #currentCallback = null
+	  #maxPayloadSize = 0
 
 	  /**
 	   * @param {Map<string, string>} extensions
 	   */
-	  constructor (extensions) {
+	  constructor (extensions, options) {
 	    this.#options.serverNoContextTakeover = extensions.has('server_no_context_takeover');
 	    this.#options.serverMaxWindowBits = extensions.get('server_max_window_bits');
+
+	    this.#maxPayloadSize = options.maxPayloadSize;
 	  }
 
+	  /**
+	   * Decompress a compressed payload.
+	   * @param {Buffer} chunk Compressed data
+	   * @param {boolean} fin Final fragment flag
+	   * @param {Function} callback Callback function
+	   */
 	  decompress (chunk, fin, callback) {
 	    // An endpoint uses the following algorithm to decompress a message.
 	    // 1.  Append 4 octets of 0x00 0x00 0xff 0xff to the tail end of the
 	    //     payload of the message.
 	    // 2.  Decompress the resulting data using DEFLATE.
-
-	    if (this.#aborted) {
-	      callback(new MessageSizeExceededError());
-	      return
-	    }
-
 	    if (!this.#inflate) {
 	      let windowBits = Z_DEFAULT_WINDOWBITS;
 
@@ -25667,23 +25672,12 @@ function requirePermessageDeflate () {
 	      this.#inflate[kLength] = 0;
 
 	      this.#inflate.on('data', (data) => {
-	        if (this.#aborted) {
-	          return
-	        }
-
 	        this.#inflate[kLength] += data.length;
 
-	        if (this.#inflate[kLength] > kDefaultMaxDecompressedSize) {
-	          this.#aborted = true;
+	        if (this.#maxPayloadSize > 0 && this.#inflate[kLength] > this.#maxPayloadSize) {
+	          callback(new MessageSizeExceededError());
 	          this.#inflate.removeAllListeners();
-	          this.#inflate.destroy();
 	          this.#inflate = null;
-
-	          if (this.#currentCallback) {
-	            const cb = this.#currentCallback;
-	            this.#currentCallback = null;
-	            cb(new MessageSizeExceededError());
-	          }
 	          return
 	        }
 
@@ -25696,14 +25690,13 @@ function requirePermessageDeflate () {
 	      });
 	    }
 
-	    this.#currentCallback = callback;
 	    this.#inflate.write(chunk);
 	    if (fin) {
 	      this.#inflate.write(tail);
 	    }
 
 	    this.#inflate.flush(() => {
-	      if (this.#aborted || !this.#inflate) {
+	      if (!this.#inflate) {
 	        return
 	      }
 
@@ -25711,7 +25704,6 @@ function requirePermessageDeflate () {
 
 	      this.#inflate[kBuffer].length = 0;
 	      this.#inflate[kLength] = 0;
-	      this.#currentCallback = null;
 
 	      callback(null, full);
 	    });
@@ -25747,6 +25739,7 @@ function requireReceiver () {
 	const { WebsocketFrameSend } = requireFrame();
 	const { closeWebSocketConnection } = requireConnection();
 	const { PerMessageDeflate } = requirePermessageDeflate();
+	const { MessageSizeExceededError } = requireErrors();
 
 	// This code was influenced by ws released under the MIT license.
 	// Copyright (c) 2011 Einar Otto Stangvik <einaros@gmail.com>
@@ -25755,6 +25748,7 @@ function requireReceiver () {
 
 	class ByteParser extends Writable {
 	  #buffers = []
+	  #fragmentsBytes = 0
 	  #byteOffset = 0
 	  #loop = false
 
@@ -25766,18 +25760,23 @@ function requireReceiver () {
 	  /** @type {Map<string, PerMessageDeflate>} */
 	  #extensions
 
+	  /** @type {number} */
+	  #maxPayloadSize
+
 	  /**
 	   * @param {import('./websocket').WebSocket} ws
 	   * @param {Map<string, string>|null} extensions
+	   * @param {{ maxPayloadSize?: number }} [options]
 	   */
-	  constructor (ws, extensions) {
+	  constructor (ws, extensions, options = {}) {
 	    super();
 
 	    this.ws = ws;
 	    this.#extensions = extensions == null ? new Map() : extensions;
+	    this.#maxPayloadSize = options.maxPayloadSize ?? 0;
 
 	    if (this.#extensions.has('permessage-deflate')) {
-	      this.#extensions.set('permessage-deflate', new PerMessageDeflate(extensions));
+	      this.#extensions.set('permessage-deflate', new PerMessageDeflate(extensions, options));
 	    }
 	  }
 
@@ -25791,6 +25790,19 @@ function requireReceiver () {
 	    this.#loop = true;
 
 	    this.run(callback);
+	  }
+
+	  #validatePayloadLength () {
+	    if (
+	      this.#maxPayloadSize > 0 &&
+	      !isControlFrame(this.#info.opcode) &&
+	      this.#info.payloadLength > this.#maxPayloadSize
+	    ) {
+	      failWebsocketConnection(this.ws, 'Payload size exceeds maximum allowed size');
+	      return false
+	    }
+
+	    return true
 	  }
 
 	  /**
@@ -25881,6 +25893,10 @@ function requireReceiver () {
 	        if (payloadLength <= 125) {
 	          this.#info.payloadLength = payloadLength;
 	          this.#state = parserStates.READ_DATA;
+
+	          if (!this.#validatePayloadLength()) {
+	            return
+	          }
 	        } else if (payloadLength === 126) {
 	          this.#state = parserStates.PAYLOADLENGTH_16;
 	        } else if (payloadLength === 127) {
@@ -25905,6 +25921,10 @@ function requireReceiver () {
 
 	        this.#info.payloadLength = buffer.readUInt16BE(0);
 	        this.#state = parserStates.READ_DATA;
+
+	        if (!this.#validatePayloadLength()) {
+	          return
+	        }
 	      } else if (this.#state === parserStates.PAYLOADLENGTH_64) {
 	        if (this.#byteOffset < 8) {
 	          return callback()
@@ -25927,6 +25947,10 @@ function requireReceiver () {
 
 	        this.#info.payloadLength = lower;
 	        this.#state = parserStates.READ_DATA;
+
+	        if (!this.#validatePayloadLength()) {
+	          return
+	        }
 	      } else if (this.#state === parserStates.READ_DATA) {
 	        if (this.#byteOffset < this.#info.payloadLength) {
 	          return callback()
@@ -25939,42 +25963,53 @@ function requireReceiver () {
 	          this.#state = parserStates.INFO;
 	        } else {
 	          if (!this.#info.compressed) {
-	            this.#fragments.push(body);
+	            this.writeFragments(body);
+
+	            if (this.#maxPayloadSize > 0 && this.#fragmentsBytes > this.#maxPayloadSize) {
+	              failWebsocketConnection(this.ws, new MessageSizeExceededError().message);
+	              return
+	            }
 
 	            // If the frame is not fragmented, a message has been received.
 	            // If the frame is fragmented, it will terminate with a fin bit set
 	            // and an opcode of 0 (continuation), therefore we handle that when
 	            // parsing continuation frames, not here.
 	            if (!this.#info.fragmented && this.#info.fin) {
-	              const fullMessage = Buffer.concat(this.#fragments);
-	              websocketMessageReceived(this.ws, this.#info.binaryType, fullMessage);
-	              this.#fragments.length = 0;
+	              websocketMessageReceived(this.ws, this.#info.binaryType, this.consumeFragments());
 	            }
 
 	            this.#state = parserStates.INFO;
 	          } else {
-	            this.#extensions.get('permessage-deflate').decompress(body, this.#info.fin, (error, data) => {
-	              if (error) {
-	                failWebsocketConnection(this.ws, error.message);
-	                return
-	              }
+	            this.#extensions.get('permessage-deflate').decompress(
+	              body,
+	              this.#info.fin,
+	              (error, data) => {
+	                if (error) {
+	                  failWebsocketConnection(this.ws, error.message);
+	                  return
+	                }
 
-	              this.#fragments.push(data);
+	                this.writeFragments(data);
 
-	              if (!this.#info.fin) {
-	                this.#state = parserStates.INFO;
+	                if (this.#maxPayloadSize > 0 && this.#fragmentsBytes > this.#maxPayloadSize) {
+	                  failWebsocketConnection(this.ws, new MessageSizeExceededError().message);
+	                  return
+	                }
+
+	                if (!this.#info.fin) {
+	                  this.#state = parserStates.INFO;
+	                  this.#loop = true;
+	                  this.run(callback);
+	                  return
+	                }
+
+	                websocketMessageReceived(this.ws, this.#info.binaryType, this.consumeFragments());
+
 	                this.#loop = true;
+	                this.#state = parserStates.INFO;
 	                this.run(callback);
-	                return
 	              }
-
-	              websocketMessageReceived(this.ws, this.#info.binaryType, Buffer.concat(this.#fragments));
-
-	              this.#loop = true;
-	              this.#state = parserStates.INFO;
-	              this.#fragments.length = 0;
-	              this.run(callback);
-	            });
+	            );
 
 	            this.#loop = false;
 	            break
@@ -26024,6 +26059,26 @@ function requireReceiver () {
 	    this.#byteOffset -= n;
 
 	    return buffer
+	  }
+
+	  writeFragments (fragment) {
+	    this.#fragmentsBytes += fragment.length;
+	    this.#fragments.push(fragment);
+	  }
+
+	  consumeFragments () {
+	    const fragments = this.#fragments;
+
+	    if (fragments.length === 1) {
+	      this.#fragmentsBytes = 0;
+	      return fragments.shift()
+	    }
+
+	    const output = Buffer.concat(fragments, this.#fragmentsBytes);
+	    this.#fragments = [];
+	    this.#fragmentsBytes = 0;
+
+	    return output
 	  }
 
 	  parseCloseBody (data) {
@@ -26711,7 +26766,11 @@ function requireWebsocket () {
 	    // once this happens, the connection is open
 	    this[kResponse] = response;
 
-	    const parser = new ByteParser(this, parsedExtensions);
+	    const maxPayloadSize = this[kController]?.dispatcher?.webSocketOptions?.maxPayloadSize;
+
+	    const parser = new ByteParser(this, parsedExtensions, {
+	      maxPayloadSize
+	    });
 	    parser.on('drain', onParserDrain);
 	    parser.on('error', onParserError.bind(this));
 
@@ -36958,13 +37017,13 @@ class Sanitizer {
                     message: value.message,
                 };
             }
-            if (key === "headers") {
+            if (key === "headers" && isObject$1(value)) {
                 return this.sanitizeHeaders(value);
             }
-            else if (key === "url") {
+            else if (key === "url" && typeof value === "string") {
                 return this.sanitizeUrl(value);
             }
-            else if (key === "query") {
+            else if (key === "query" && isObject$1(value)) {
                 return this.sanitizeQuery(value);
             }
             else if (key === "body") {
@@ -37874,11 +37933,11 @@ function retryPolicy(strategies, options = { maxRetries: DEFAULT_RETRY_POLICY_CO
                     // RestErrors are valid targets for the retry strategies.
                     // If none of the retry strategies can work with them, they will be thrown later in this policy.
                     // If the received error is not a RestError, it is immediately thrown.
-                    responseError = e;
-                    if (!e || responseError.name !== "RestError") {
+                    if (!isRestError$1(e)) {
                         throw e;
                     }
-                    response = responseError.response;
+                    responseError = e;
+                    response = e.response;
                 }
                 if (request.abortSignal?.aborted) {
                     logger.error(`Retry ${retryCount}: Request aborted.`);
@@ -40154,16 +40213,15 @@ function setProxyAgentOnRequest(request, cachedAgents, proxyUrl) {
     if (request.tlsSettings) {
         logger$4.warning("TLS settings are not supported in combination with custom Proxy, certificates provided to the client will be ignored.");
     }
-    const headers = request.headers.toJSON();
     if (isInsecure) {
         if (!cachedAgents.httpProxyAgent) {
-            cachedAgents.httpProxyAgent = new distExports.HttpProxyAgent(proxyUrl, { headers });
+            cachedAgents.httpProxyAgent = new distExports.HttpProxyAgent(proxyUrl);
         }
         request.agent = cachedAgents.httpProxyAgent;
     }
     else {
         if (!cachedAgents.httpsProxyAgent) {
-            cachedAgents.httpsProxyAgent = new distExports$1.HttpsProxyAgent(proxyUrl, { headers });
+            cachedAgents.httpsProxyAgent = new distExports$1.HttpsProxyAgent(proxyUrl);
         }
         request.agent = cachedAgents.httpsProxyAgent;
     }
@@ -40246,7 +40304,7 @@ function tlsPolicy$1(tlsSettings) {
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 function isBlob$1(x) {
-    return typeof x.stream === "function";
+    return typeof Blob !== "undefined" && x instanceof Blob;
 }
 
 // Copyright (c) Microsoft Corporation.
@@ -49172,20 +49230,34 @@ const XML_CHARKEY = "_";
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 function getCommonOptions(options) {
-    var _a;
     return {
         attributesGroupName: XML_ATTRKEY,
-        textNodeName: (_a = options.xmlCharKey) !== null && _a !== void 0 ? _a : XML_CHARKEY,
+        textNodeName: options.xmlCharKey ?? XML_CHARKEY,
         ignoreAttributes: false,
         suppressBooleanAttributes: false,
     };
 }
 function getSerializerOptions(options = {}) {
-    var _a, _b;
-    return Object.assign(Object.assign({}, getCommonOptions(options)), { attributeNamePrefix: "@_", format: true, suppressEmptyNode: true, indentBy: "", rootNodeName: (_a = options.rootName) !== null && _a !== void 0 ? _a : "root", cdataPropName: (_b = options.cdataPropName) !== null && _b !== void 0 ? _b : "__cdata" });
+    return {
+        ...getCommonOptions(options),
+        attributeNamePrefix: "@_",
+        format: true,
+        suppressEmptyNode: true,
+        indentBy: "",
+        rootNodeName: options.rootName ?? "root",
+        cdataPropName: options.cdataPropName ?? "__cdata",
+    };
 }
 function getParserOptions(options = {}) {
-    return Object.assign(Object.assign({}, getCommonOptions(options)), { parseAttributeValue: false, parseTagValue: false, attributeNamePrefix: "", stopNodes: options.stopNodes, processEntities: true, trimValues: false });
+    return {
+        ...getCommonOptions(options),
+        parseAttributeValue: false,
+        parseTagValue: false,
+        attributeNamePrefix: "",
+        stopNodes: options.stopNodes,
+        processEntities: true,
+        trimValues: false,
+    };
 }
 /**
  * Converts given JSON object to XML string
@@ -49224,7 +49296,7 @@ async function parseXML(str, opts = {}) {
     if (!opts.includeRoot) {
         for (const key of Object.keys(parsedXml)) {
             const value = parsedXml[key];
-            return typeof value === "object" ? Object.assign({}, value) : value;
+            return typeof value === "object" ? { ...value } : value;
         }
     }
     return parsedXml;
@@ -94692,7 +94764,7 @@ function requireFollowRedirects () {
 var followRedirectsExports = requireFollowRedirects();
 var followRedirects = /*@__PURE__*/getDefaultExportFromCjs(followRedirectsExports);
 
-const VERSION$1 = "1.15.1";
+const VERSION$1 = "1.15.2";
 
 function parseProtocol(url) {
   const match = /^([-+\w]{1,25})(:?\/\/|:)/.exec(url);
@@ -95449,6 +95521,11 @@ const { http: httpFollow, https: httpsFollow } = followRedirects;
 
 const isHttps = /https:?/;
 
+// Symbols used to bind a single 'error' listener to a pooled socket and track
+// the request currently owning that socket across keep-alive reuse (issue #10780).
+const kAxiosSocketListener = Symbol('axios.http.socketListener');
+const kAxiosCurrentReq = Symbol('axios.http.currentReq');
+
 const supportedProtocols = platform.protocols.map((protocol) => {
   return protocol + ':';
 });
@@ -95734,7 +95811,7 @@ const http2Transport = {
 /*eslint consistent-return:0*/
 var httpAdapter = isHttpAdapterSupported &&
   function httpAdapter(config) {
-    return wrapAsync(async function dispatchHttpRequest(resolve, reject, onDone) {
+    return wrapAsync(async function dispatchHttpRequest(resolve$1, reject, onDone) {
       const own = (key) => (utils$1.hasOwnProp(config, key) ? config[key] : undefined);
       let data = own('data');
       let lookup = own('lookup');
@@ -95860,7 +95937,7 @@ var httpAdapter = isHttpAdapterSupported &&
         let convertedData;
 
         if (method !== 'GET') {
-          return settle(resolve, reject, {
+          return settle(resolve$1, reject, {
             status: 405,
             statusText: 'method not allowed',
             headers: {},
@@ -95886,7 +95963,7 @@ var httpAdapter = isHttpAdapterSupported &&
           convertedData = stream__default.Readable.from(convertedData);
         }
 
-        return settle(resolve, reject, {
+        return settle(resolve$1, reject, {
           data: convertedData,
           status: 200,
           statusText: 'OK',
@@ -96014,9 +96091,10 @@ var httpAdapter = isHttpAdapterSupported &&
 
       // HTTP basic authentication
       let auth = undefined;
-      if (config.auth) {
-        const username = config.auth.username || '';
-        const password = config.auth.password || '';
+      const configAuth = own('auth');
+      if (configAuth) {
+        const username = configAuth.username || '';
+        const password = configAuth.password || '';
         auth = username + ':' + password;
       }
 
@@ -96050,7 +96128,10 @@ var httpAdapter = isHttpAdapterSupported &&
         false
       );
 
-      const options = {
+      // Null-prototype to block prototype pollution gadgets on properties read
+      // directly by Node's http.request (e.g. insecureHTTPParser, lookup).
+      // See GHSA-q8qp-cvcw-x6jj.
+      const options = Object.assign(Object.create(null), {
         path,
         method: method,
         headers: headers.toJSON(),
@@ -96059,14 +96140,41 @@ var httpAdapter = isHttpAdapterSupported &&
         protocol,
         family,
         beforeRedirect: dispatchBeforeRedirect,
-        beforeRedirects: {},
+        beforeRedirects: Object.create(null),
         http2Options,
-      };
+      });
 
       // cacheable-lookup integration hotfix
       !utils$1.isUndefined(lookup) && (options.lookup = lookup);
 
       if (config.socketPath) {
+        if (typeof config.socketPath !== 'string') {
+          return reject(new AxiosError$1(
+            'socketPath must be a string',
+            AxiosError$1.ERR_BAD_OPTION_VALUE,
+            config
+          ));
+        }
+
+        if (config.allowedSocketPaths != null) {
+          const allowed = Array.isArray(config.allowedSocketPaths)
+            ? config.allowedSocketPaths
+            : [config.allowedSocketPaths];
+
+          const resolvedSocket = resolve(config.socketPath);
+          const isAllowed = allowed.some(
+            (entry) => typeof entry === 'string' && resolve(entry) === resolvedSocket
+          );
+
+          if (!isAllowed) {
+            return reject(new AxiosError$1(
+              `socketPath "${config.socketPath}" is not permitted by allowedSocketPaths`,
+              AxiosError$1.ERR_BAD_OPTION_VALUE,
+              config
+            ));
+          }
+        }
+
         options.socketPath = config.socketPath;
       } else {
         options.hostname = parsed.hostname.startsWith('[')
@@ -96095,8 +96203,9 @@ var httpAdapter = isHttpAdapterSupported &&
           if (config.maxRedirects) {
             options.maxRedirects = config.maxRedirects;
           }
-          if (config.beforeRedirect) {
-            options.beforeRedirects.config = config.beforeRedirect;
+          const configBeforeRedirect = own('beforeRedirect');
+          if (configBeforeRedirect) {
+            options.beforeRedirects.config = configBeforeRedirect;
           }
           transport = isHttpsRequest ? httpsFollow : httpFollow;
         }
@@ -96109,9 +96218,10 @@ var httpAdapter = isHttpAdapterSupported &&
         options.maxBodyLength = Infinity;
       }
 
-      if (config.insecureHTTPParser) {
-        options.insecureHTTPParser = config.insecureHTTPParser;
-      }
+      // Always set an explicit own value so a polluted
+      // Object.prototype.insecureHTTPParser cannot enable the lenient parser
+      // through Node's internal options copy (GHSA-q8qp-cvcw-x6jj).
+      options.insecureHTTPParser = Boolean(own('insecureHTTPParser'));
 
       // Create the request
       req = transport.request(options, function handleResponse(res) {
@@ -96220,7 +96330,7 @@ var httpAdapter = isHttpAdapterSupported &&
             });
           }
           response.data = responseStream;
-          settle(resolve, reject, response);
+          settle(resolve$1, reject, response);
         } else {
           const responseBuffer = [];
           let totalResponseBytes = 0;
@@ -96279,7 +96389,7 @@ var httpAdapter = isHttpAdapterSupported &&
             } catch (err) {
               return reject(AxiosError$1.from(err, null, config, response.request, response));
             }
-            settle(resolve, reject, response);
+            settle(resolve$1, reject, response);
           });
         }
 
@@ -96309,20 +96419,28 @@ var httpAdapter = isHttpAdapterSupported &&
         // default interval of sending ack packet is 1 minute
         socket.setKeepAlive(true, 1000 * 60);
 
-        const removeSocketErrorListener = () => {
-          socket.removeListener('error', handleRequestSocketError);
-        };
-
-        function handleRequestSocketError(err) {
-          removeSocketErrorListener();
-
-          if (!req.destroyed) {
-            req.destroy(err);
-          }
+        // Install a single 'error' listener per socket (not per request) to avoid
+        // accumulating listeners on pooled keep-alive sockets that get reassigned
+        // to new requests before the previous request's 'close' fires (issue #10780).
+        // The listener is bound to the socket's currently-active request via a
+        // symbol, which is swapped as the socket is reassigned.
+        if (!socket[kAxiosSocketListener]) {
+          socket.on('error', function handleSocketError(err) {
+            const current = socket[kAxiosCurrentReq];
+            if (current && !current.destroyed) {
+              current.destroy(err);
+            }
+          });
+          socket[kAxiosSocketListener] = true;
         }
 
-        socket.on('error', handleRequestSocketError);
-        req.once('close', removeSocketErrorListener);
+        socket[kAxiosCurrentReq] = req;
+
+        req.once('close', function clearCurrentReq() {
+          if (socket[kAxiosCurrentReq] === req) {
+            socket[kAxiosCurrentReq] = null;
+          }
+        });
       });
 
       // Handle request timeout
@@ -96508,7 +96626,18 @@ const headersToObject = (thing) => (thing instanceof AxiosHeaders$1 ? { ...thing
 function mergeConfig$1(config1, config2) {
   // eslint-disable-next-line no-param-reassign
   config2 = config2 || {};
-  const config = {};
+
+  // Use a null-prototype object so that downstream reads such as `config.auth`
+  // or `config.baseURL` cannot inherit polluted values from Object.prototype
+  // (see GHSA-q8qp-cvcw-x6jj). `hasOwnProperty` is restored as a non-enumerable
+  // own slot to preserve ergonomics for user code that relies on it.
+  const config = Object.create(null);
+  Object.defineProperty(config, 'hasOwnProperty', {
+    value: Object.prototype.hasOwnProperty,
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  });
 
   function getMergedValue(target, source, prop, caseless) {
     if (utils$1.isPlainObject(target) && utils$1.isPlainObject(source)) {
@@ -96581,6 +96710,7 @@ function mergeConfig$1(config1, config2) {
     httpsAgent: defaultToConfig2,
     cancelToken: defaultToConfig2,
     socketPath: defaultToConfig2,
+    allowedSocketPaths: defaultToConfig2,
     responseEncoding: defaultToConfig2,
     validateStatus: mergeDirectKeys,
     headers: (a, b, prop) =>
@@ -96602,12 +96732,24 @@ function mergeConfig$1(config1, config2) {
 var resolveConfig = (config) => {
   const newConfig = mergeConfig$1({}, config);
 
-  let { data, withXSRFToken, xsrfHeaderName, xsrfCookieName, headers, auth } = newConfig;
+  // Read only own properties to prevent prototype pollution gadgets
+  // (e.g. Object.prototype.baseURL = 'https://evil.com'). See GHSA-q8qp-cvcw-x6jj.
+  const own = (key) => (utils$1.hasOwnProp(newConfig, key) ? newConfig[key] : undefined);
+
+  const data = own('data');
+  let withXSRFToken = own('withXSRFToken');
+  const xsrfHeaderName = own('xsrfHeaderName');
+  const xsrfCookieName = own('xsrfCookieName');
+  let headers = own('headers');
+  const auth = own('auth');
+  const baseURL = own('baseURL');
+  const allowAbsoluteUrls = own('allowAbsoluteUrls');
+  const url = own('url');
 
   newConfig.headers = headers = AxiosHeaders$1.from(headers);
 
   newConfig.url = buildURL(
-    buildFullPath(newConfig.baseURL, newConfig.url, newConfig.allowAbsoluteUrls),
+    buildFullPath(baseURL, url, allowAbsoluteUrls),
     config.params,
     config.paramsSerializer
   );
@@ -97637,7 +97779,9 @@ function assertOptions(options, schema, allowUnknown) {
   let i = keys.length;
   while (i-- > 0) {
     const opt = keys[i];
-    const validator = schema[opt];
+    // Use hasOwnProperty so a polluted Object.prototype.<opt> cannot supply
+    // a non-function validator and cause a TypeError. See GHSA-q8qp-cvcw-x6jj.
+    const validator = Object.prototype.hasOwnProperty.call(schema, opt) ? schema[opt] : undefined;
     if (validator) {
       const value = options[opt];
       const result = value === undefined || validator(value, opt, options);
@@ -98256,18 +98400,38 @@ const {
 } = axios;
 
 async function validateSubscription() {
-    const API_URL = `https://agent.api.stepsecurity.io/v1/github/${process.env.GITHUB_REPOSITORY}/actions/subscription`;
+    const eventPath = process.env.GITHUB_EVENT_PATH;
+    let repoPrivate;
+    if (eventPath && fs.existsSync(eventPath)) {
+        const eventData = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+        repoPrivate = eventData?.repository?.private;
+    }
+    const upstream = "reviewdog/action-golangci-lint";
+    const action = process.env.GITHUB_ACTION_REPOSITORY;
+    const docsUrl = "https://docs.stepsecurity.io/actions/stepsecurity-maintained-actions";
+    info("");
+    info("\u001b[1;36mStepSecurity Maintained Action\u001b[0m");
+    info(`Secure drop-in replacement for ${upstream}`);
+    if (repoPrivate === false)
+        info("\u001b[32m\u2713 Free for public repositories\u001b[0m");
+    info(`\u001b[36mLearn more:\u001b[0m ${docsUrl}`);
+    info("");
+    if (repoPrivate === false)
+        return;
+    const serverUrl = process.env.GITHUB_SERVER_URL || "https://github.com";
+    const body = { action: action || "" };
+    if (serverUrl !== "https://github.com")
+        body.ghes_server = serverUrl;
     try {
-        await axios.get(API_URL, { timeout: 3000 });
+        await axios.post(`https://agent.api.stepsecurity.io/v1/github/${process.env.GITHUB_REPOSITORY}/actions/maintained-actions-subscription`, body, { timeout: 3000 });
     }
     catch (error$1) {
         if (isAxiosError(error$1) && error$1.response?.status === 403) {
-            error("Subscription is not valid. Reach out to support@stepsecurity.io");
+            error(`\u001b[1;31mThis action requires a StepSecurity subscription for private repositories.\u001b[0m`);
+            error(`\u001b[31mLearn how to enable a subscription: ${docsUrl}\u001b[0m`);
             process.exit(1);
         }
-        else {
-            info("Timeout or API not reachable. Continuing to next step.");
-        }
+        info("Timeout or API not reachable. Continuing to next step.");
     }
 }
 async function run() {
