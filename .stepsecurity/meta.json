@@ -1,0 +1,18 @@
+{
+   "schema_version": "1",
+   "onboarding_type": "copied",
+   "archived": false,
+   "maintained_action_name": "step-security/action-golangci-lint",
+   "upstream_full_repo_name": "reviewdog/action-golangci-lint",
+   "action_type": "node",
+   "last_release": {
+     "tag_name": "v2.10.0",
+     "created_at": "2026-04-25T06:19:47Z",
+     "published_at": "2026-04-28T03:41:45Z"
+   },
+   "sync": {
+     "ignore_presets": [
+       "defaults_v1"
+     ]
+   }
+ }
