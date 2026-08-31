@@ -202,7 +202,7 @@ jobs:
           egress-policy: audit
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: step-security/action-actionlint@636868d8a7788bc5b3d0ce221b89c1d7132084b7 # v1.68.1
+      - uses: step-security/action-actionlint@c3aa382d371c6b05513ae5907d4f77713e21813c # v1.72.0
 
   eslint:
     runs-on: ubuntu-latest
